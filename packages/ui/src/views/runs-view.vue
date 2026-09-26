@@ -21,7 +21,7 @@ function goToRun(id: string): void {
 </script>
 
 <template>
-  <div class="mx-auto max-w-6xl px-5 py-8 md:px-12 md:py-20">
+  <div class="px-5 py-8 md:px-12 md:py-20">
     <WH1 text="Runs" />
     <p v-if="store.loading && store.runs.length === 0" class="mt-8 font-text text-sm text-text-muted">Loading…</p>
     <p v-else-if="store.error" class="mt-8 font-text text-sm text-error">{{ store.error }}</p>

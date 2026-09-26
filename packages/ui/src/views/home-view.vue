@@ -12,7 +12,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-6xl px-5 py-8 md:px-12 md:py-20">
+  <div class="px-5 py-8 md:px-12 md:py-20">
     <header class="mb-10">
       <WH1 text="Home" />
     </header>

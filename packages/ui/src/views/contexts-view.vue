@@ -55,7 +55,7 @@ function handleDelete(name: string): void {
 </script>
 
 <template>
-  <div class="mx-auto max-w-6xl px-5 py-8 md:px-12 md:py-20">
+  <div class="px-5 py-8 md:px-12 md:py-20">
     <div class="flex flex-wrap items-center justify-between gap-4">
       <WH1 text="Contexts" />
       <button

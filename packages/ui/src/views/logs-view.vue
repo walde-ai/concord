@@ -42,7 +42,7 @@ watch(
 </script>
 
 <template>
-  <div class="mx-auto max-w-6xl px-5 py-8 md:px-12 md:py-20">
+  <div class="px-5 py-8 md:px-12 md:py-20">
     <WH1 text="Logs" />
 
     <div class="mt-8 flex flex-wrap items-center gap-3">
