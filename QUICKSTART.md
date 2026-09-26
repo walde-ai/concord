@@ -1,3 +1,23 @@
+# Concord — Quickstart & Operator Guide
+
+This document is the **single source of truth for an agent or a human** to take a
+fresh machine from zero to a running, fully-configured Concord installation.
+
+Everything in this guide is driven from the CLI (`packages/concord`). No SQL, no HTTP
+calls, no manual file editing is required. The CLI talks **directly to the SQLite
+database** for every administrative operation, so it works unauthenticated on the
+host that runs the server. Remote/authenticated operation is supported for the
+two commands that talk to a live server (`event emit`, `context upsert` without
+`--local`).
+
+> Read this document top to bottom the first time. Each later section links back
+> to the CLI commands it depends on. If your goal is to build an agent-driven
+> software factory on top of Concord (PR verification loops, fix agents, spec
+> flows), read [`SOFTWARE_FACTORY.md`](./SOFTWARE_FACTORY.md) after section 7 —
+> it turns the pieces configured here into a working factory.
+
+---
+
 ## 1. Repository layout
 
 ```
@@ -13,6 +33,7 @@ concord/                         monorepo root
 │                                step only; the bundle is embedded into
 │                                @walde.ai/concord and never published itself)
 ├── issues/                      specs for the feature workflow
+├── SOFTWARE_FACTORY.md          guide: build an agent-driven factory on Concord
 └── README.md                    architectural overview of the library
 ```
 
@@ -20,23 +41,6 @@ The CLI is shipped by `@walde.ai/concord` as the `concord` binary
 (`packages/concord/dist/cli/bin/concord.js`). Dispatch is a handler table in
 `packages/concord/src/cli/main/run-command.ts`; deployments can extend it with
 extra noun/verb handlers through the exported `runCli` runner.
-
----
-
-# Concord — Quickstart & Operator Guide
-
-This document is the **single source of truth for an agent or a human** to take a
-fresh machine from zero to a running, fully-configured Concord installation.
-
-Everything in this guide is driven from the CLI (`packages/concord`). No SQL, no HTTP
-calls, no manual file editing is required. The CLI talks **directly to the SQLite
-database** for every administrative operation, so it works unauthenticated on the
-host that runs the server. Remote/authenticated operation is supported for the
-two commands that talk to a live server (`event emit`, `context upsert` without
-`--local`).
-
-> Read this document top to bottom the first time. Each later section links back
-> to the CLI commands it depends on.
 
 ---
 

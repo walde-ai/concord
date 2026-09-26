@@ -1,13 +1,33 @@
+<p align="center">
+  <img src="packages/ui/public/concord.png" width="128" alt="Concord logo" />
+</p>
+
 # Concord
+
+Concord builds **software factories**: every change on a pull request becomes
+an event, AI agents verify it against your integration tests, fix whatever
+fails, and loop until the change is safe to merge. Feature work enters the
+same loop as specs, scoped and implemented by agents. See
+[`SOFTWARE_FACTORY.md`](./SOFTWARE_FACTORY.md) for the step-by-step guide to
+building one on any codebase.
+
+Because Concord drives its agents through
+[opencode](https://opencode.ai), any coding agent works: Claude (Anthropic),
+GPT (OpenAI), Gemini (Google), Qwen, Grok, DeepSeek, or local models via
+Ollama. You configure the model per consumer, in persisted configuration,
+without touching code.
 
 > **Operating Concord?** Read [`QUICKSTART.md`](./QUICKSTART.md) — it is the
 > step-by-step guide for building the project, bootstrapping the first user,
 > configuring peak hours / pause / per-consumer enable bits, and driving every
-> administrative task from the `concord` CLI. This README focuses on the
+> administrative task from the `concord` CLI. **Building a factory on top of
+> it?** Read [`SOFTWARE_FACTORY.md`](./SOFTWARE_FACTORY.md) — it covers the
+> PR verification loop, the fix loop, the spec flow, and the integration-test
+> contract that makes the loop trustworthy. This README focuses on the
 > library's architecture and API.
 
 Concord is an event-driven engine for orchestrating AI and deterministic
-workflows — the machinery behind an agent-based software factory.
+workflows — the machinery underneath.
 
 A **producer** produces an **event**. The event is signalled to every registered
 **consumer**. Each consumer owns a **rule** that decides whether it wants to
