@@ -1,6 +1,6 @@
 {
   "name": "@walde.ai/concord",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Concord — event-driven orchestration engine for agent-based software factories",
   "license": "MIT",
   "repository": {
