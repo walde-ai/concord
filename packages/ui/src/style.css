@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+/* Walde brand tokens — identical to @walde.ai/ux tokens.css (the single
+ * source of truth shared by every first-party application: hub, em-hub,
+ * concord). Layout geometry tokens below are application-specific. */
+@theme {
+  --color-primary: #055d4a;
+  --color-primary-soft: #daece5;
+  --color-secondary: #ada9aa;
+  --color-text: #202020;
+  --color-text-muted: #ada9aa;
+  --color-border: #d6d3d4;
+  --color-background: #ffffff;
+  --color-surface: #f0f0f0;
+  --color-error: #d32f2f;
+  --font-text: "Inter", system-ui, sans-serif;
+  --font-accent: "Merriweather", Georgia, serif;
+  --font-heading: "Poppins", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code", monospace;
+  --spacing-nav-rail: 3.5rem;
+  --spacing-sidebar: 16rem;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--font-text);
+}

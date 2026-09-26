@@ -1,0 +1,13 @@
+*.log
+.worktree/
+.pr-lifecycle/
+.tokensave
+.concord/
+node_modules
+dist
+dist-dev
+dist-web
+*.tsbuildinfo
+
+# embedded UI bundle (copied from packages/ui/dist at build time)
+packages/concord/ui
