@@ -18,9 +18,11 @@ export interface PrCodeProducingRequest {
   readonly source: string;
   // Optional structured-output schema for the agent session (see
   // AgentTaskRunner.CodeProducingRequest.schema). When set and the agent's
-  // verdict reports a design escalation, the no-commit guard is skipped: the
-  // agent deliberately stopped to ask a human instead of finishing, which is
-  // not the silent no-op stall the guard exists to catch.
+  // verdict reports a design escalation (escalated: true) or a justified
+  // no-fix outcome (noFixNeeded: true), the no-commit guard is skipped: the
+  // agent deliberately stopped without a commit — to ask a human, or because
+  // the failing checks are not code defects — which is not the silent no-op
+  // stall the guard exists to catch.
   readonly schema?: object;
 }
 
@@ -51,7 +53,7 @@ export async function runPrCodeProducing(
   if (!result.ok) {
     return { ok: false, reason: result.reason };
   }
-  if (isEscalatedVerdict(request.schema !== undefined ? result.output : null)) {
+  if (isDeliberateNoCommitVerdict(request.schema !== undefined ? result.output : null)) {
     return { ok: true, emitted: false, output: result.output, worktreePath: result.worktreePath };
   }
   // Consumers that operate on a branch whose PR already exists find the PR
@@ -92,4 +94,28 @@ function isEscalatedVerdict(output: unknown): boolean {
     return false;
   }
   return (output as { escalated?: unknown }).escalated === true;
+}
+
+// Detects a justified no-fix verdict shape on a structured output: the agent
+// investigated the failing checks and concluded they are not code defects —
+// cancelled runs, infrastructure eviction, or CI budget cancellations that are
+// re-run conditions per recorded decisions — so it (re-)ran the job instead of
+// pushing a commit. Like the escalation verdict this is a deliberate,
+// self-reported outcome, not the silent no-op stall the no-commit guard exists
+// to catch, so the guard is skipped and the caller decides from the verdict.
+// Observed in production (2026-11-16): github-failure-fix diagnosed PR
+// accelerates-it/walde#1575's CDK Synth Guard failure as the job's
+// timeout-minutes budget cancelling a green suite, correctly pushed no commit
+// citing the recorded decision in walde#1500 — and the run failed as
+// "agent did not push a commit; failing checks not fixed", parking the chain
+// for a non-defect.
+export function isNoFixNeededVerdict(output: unknown): boolean {
+  if (typeof output !== "object" || output === null) {
+    return false;
+  }
+  return (output as { noFixNeeded?: unknown }).noFixNeeded === true;
+}
+
+function isDeliberateNoCommitVerdict(output: unknown): boolean {
+  return isEscalatedVerdict(output) || isNoFixNeededVerdict(output);
 }
