@@ -73,6 +73,18 @@ const PROMPT_RETRY_BACKOFF_MULTIPLIER = 2;
 // the budget bounds a model that keeps ending turns, and the run's own
 // AbortSignal bounds the total time.
 export const MAX_STRUCTURED_OUTPUT_NUDGES = 5;
+// How many times createSessionWithRetry re-issues POST /api/session after the
+// freshly spawned opencode server answers HTTP 503 {"code":"service_starting"}.
+// opencode 2.x reports /health as OK while its internal services are still
+// initializing, so the first API call can lose that race (observed in
+// production on a resource-constrained host with concurrent spawns):
+// run 84151ec1 on the Walde RPI failed terminally with
+// `opencode POST /api/session failed (HTTP 503): {"code":"service_starting"}`
+// before any prompt was sent. The refusal carries no side effects — no session
+// was created — so retrying is safe; short fixed delays cover an init that
+// routinely completes in well under a second on a healthy host.
+export const MAX_SESSION_CREATE_ATTEMPTS = 6;
+export const SESSION_CREATE_RETRY_DELAY_MS = 1_000;
 // Body of the follow-up prompt; the output contract (schema block) is appended
 // by withStructuredOutputInstruction so the required format stays in context.
 const STRUCTURED_OUTPUT_NUDGE_BODY = [
@@ -642,7 +654,11 @@ export class OpencodeSdkRunner implements OpencodeRunner {
     try {
       const baseUrl = `http://${HOST}:${server.port}`;
       const client = await this.clientFactory.create(baseUrl, auth);
-      const sessionId = await client.createSession(directory, options);
+      const sessionId = await createSessionWithRetry({
+        createSession: () => client.createSession(directory, options),
+        maxAttempts: MAX_SESSION_CREATE_ATTEMPTS,
+        delayMs: SESSION_CREATE_RETRY_DELAY_MS,
+      });
 
       // Now that the session id is known, register the per-run tools on the
       // shared backend. post_update is always available; ask_question is
@@ -1311,6 +1327,43 @@ export async function promptWithStructuredOutputNudges(request: StructuredOutput
   }
 }
 
+export interface SessionCreateRetryRequest {
+  readonly createSession: () => Promise<string>;
+  readonly maxAttempts: number;
+  readonly delayMs: number;
+}
+
+// Detects the opencode 2.x "not yet ready" refusal: the HTTP server (and thus
+// /health) is up, but internal services are still initializing and API routes
+// answer 503 {"code":"service_starting"}.
+export function isServiceStartingFailure(cause: unknown): boolean {
+  return causeChainMatches(cause, [/HTTP 503[\s\S]*service_starting/]);
+}
+
+// Creates the session, retrying the transient service_starting refusal a
+// bounded number of times with a fixed delay (see MAX_SESSION_CREATE_ATTEMPTS
+// for the production incident this covers). Any other error — a deterministic
+// API failure, a network error, an aborted spawn — propagates unchanged on the
+// first attempt; exhausting the attempts rethrows the last service_starting
+// failure so the operator sees the real refusal.
+export async function createSessionWithRetry(request: SessionCreateRetryRequest): Promise<string> {
+  let lastCause: unknown;
+  for (let attempt = 1; attempt <= request.maxAttempts; attempt = attempt + 1) {
+    try {
+      return await request.createSession();
+    } catch (cause) {
+      if (!isServiceStartingFailure(cause)) {
+        throw cause;
+      }
+      lastCause = cause;
+      if (attempt < request.maxAttempts) {
+        await delay(request.delayMs);
+      }
+    }
+  }
+  throw lastCause;
+}
+
 type HealthProbeOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly status: number; readonly body: string }
@@ -1499,6 +1552,14 @@ const PROMPT_EMPTY_RESPONSE_PATTERNS: ReadonlyArray<RegExp> = [
   /produced no assistant message/i,
 ];
 
+// The spawned server can still be answering 503 {"code":"service_starting"}
+// when the first prompt is sent (see MAX_SESSION_CREATE_ATTEMPTS): /health
+// passes before opencode's internal services finish initializing. The refusal
+// is transient and side-effect free, so the prompt is re-sent.
+const PROMPT_SERVICE_STARTING_PATTERNS: ReadonlyArray<RegExp> = [
+  /HTTP 503[\s\S]*service_starting/,
+];
+
 function causeChainMatches(cause: unknown, patterns: ReadonlyArray<RegExp>): boolean {
   let current: unknown = cause;
   while (current instanceof Error) {
@@ -1522,6 +1583,9 @@ export function isRetryablePromptFailure(cause: unknown, signal: AbortSignal | u
     return false;
   }
   if (causeChainMatches(cause, PROMPT_NETWORK_ERROR_PATTERNS)) {
+    return true;
+  }
+  if (cause instanceof UnexpectedStateError && causeChainMatches(cause, PROMPT_SERVICE_STARTING_PATTERNS)) {
     return true;
   }
   if (cause instanceof UnexpectedStateError && causeChainMatches(cause, PROMPT_EMPTY_RESPONSE_PATTERNS)) {

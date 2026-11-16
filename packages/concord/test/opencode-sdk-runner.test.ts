@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { createServer } from "net";
 import path from "path";
 
-import { OpencodeSdkRunner, ChildProcessOpencodeSpawner, HealthProbeRecorder, probeHealth, buildSessionCreateBody, withStructuredOutputInstruction, extractStructuredOutput, extractPromptResult, extractJsonFromText, parseSseFrame, isRetryablePromptFailure, retryDelayMs, promptWithStructuredOutputNudges } from "../src/infra/adapters/opencode/opencode-sdk-runner";
+import { OpencodeSdkRunner, ChildProcessOpencodeSpawner, HealthProbeRecorder, probeHealth, buildSessionCreateBody, withStructuredOutputInstruction, extractStructuredOutput, extractPromptResult, extractJsonFromText, parseSseFrame, isRetryablePromptFailure, retryDelayMs, promptWithStructuredOutputNudges, createSessionWithRetry, isServiceStartingFailure } from "../src/infra/adapters/opencode/opencode-sdk-runner";
 import { noopLogger } from "../src/domain/ports/out/logger";
 import type {
   OpencodeServerSpawner,
@@ -609,9 +609,78 @@ describe("isRetryablePromptFailure", () => {
     expect(isRetryablePromptFailure(new Error("fetch failed"), controller.signal)).toBe(false);
   });
 
+  it("retries the opencode service_starting refusal observed right after /health passes", () => {
+    const refusal = new UnexpectedStateError(
+      'opencode POST /api/session/ses_1/prompt failed (HTTP 503): {"code":"service_starting"}',
+    );
+    expect(isRetryablePromptFailure(refusal, undefined)).toBe(true);
+    // Deterministic 503s without the service_starting marker stay terminal.
+    expect(isRetryablePromptFailure(new UnexpectedStateError("opencode POST /api/session failed (HTTP 503): nope"), undefined)).toBe(false);
+  });
+
   it("does not retry non-transient errors or deterministic UnexpectedStateErrors", () => {
     expect(isRetryablePromptFailure(new Error("agent blew up"), undefined)).toBe(false);
     expect(isRetryablePromptFailure(new UnexpectedStateError("Opencode produced no structured output; final assistant text: ..."), undefined)).toBe(false);
+  });
+});
+
+describe("createSessionWithRetry", () => {
+  const serviceStarting = (): Error =>
+    new UnexpectedStateError('opencode POST /api/session failed (HTTP 503): {"code":"service_starting"}');
+
+  it("returns the session id once the server leaves service_starting", async () => {
+    const attempts: number[] = [];
+    const sessionId = await createSessionWithRetry({
+      createSession: async (): Promise<string> => {
+        attempts.push(attempts.length + 1);
+        if (attempts.length < 3) {
+          throw serviceStarting();
+        }
+        return "ses_ready";
+      },
+      maxAttempts: 6,
+      delayMs: 0,
+    });
+    expect(sessionId).toBe("ses_ready");
+    expect(attempts).toHaveLength(3);
+  });
+
+  it("rethrows the service_starting failure after exhausting the attempts", async () => {
+    let calls = 0;
+    await expect(
+      createSessionWithRetry({
+        createSession: async (): Promise<string> => {
+          calls = calls + 1;
+          throw serviceStarting();
+        },
+        maxAttempts: 3,
+        delayMs: 0,
+      }),
+    ).rejects.toThrow(/service_starting/);
+    expect(calls).toBe(3);
+  });
+
+  it("propagates any other error on the first attempt without retrying", async () => {
+    let calls = 0;
+    await expect(
+      createSessionWithRetry({
+        createSession: async (): Promise<string> => {
+          calls = calls + 1;
+          throw new UnexpectedStateError("opencode POST /api/session failed (HTTP 401): bad credentials");
+        },
+        maxAttempts: 6,
+        delayMs: 0,
+      }),
+    ).rejects.toThrow(/HTTP 401/);
+    expect(calls).toBe(1);
+  });
+
+  it("detects the service_starting signature through an error cause chain", () => {
+    const inner = serviceStarting();
+    const outer = new UnexpectedStateError("wrapped failure");
+    (outer as { cause?: unknown }).cause = inner;
+    expect(isServiceStartingFailure(outer)).toBe(true);
+    expect(isServiceStartingFailure(new Error("fetch failed"))).toBe(false);
   });
 });
 
