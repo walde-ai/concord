@@ -1199,7 +1199,7 @@ describe("sqlite pull request lifecycle store", () => {
     headSha: string;
     openedEmitted: boolean;
     mergeConflictsEmittedForSha: boolean;
-    testsTerminalEmittedForSha: boolean;
+    testsOutcomeEmittedForSha: "failed" | "succeeded" | null;
     consecutiveEmptyScansForSha: number;
     mergedEmitted: boolean;
     terminal: boolean;
@@ -1208,7 +1208,7 @@ describe("sqlite pull request lifecycle store", () => {
       headSha: "sha-1",
       openedEmitted: true,
       mergeConflictsEmittedForSha: false,
-      testsTerminalEmittedForSha: true,
+      testsOutcomeEmittedForSha: "failed",
       consecutiveEmptyScansForSha: 0,
       mergedEmitted: false,
       terminal: false,
@@ -1244,12 +1244,67 @@ describe("sqlite pull request lifecycle store", () => {
     const database = new SqliteDatabase(temp.path);
     const store = new SqlitePullRequestLifecycleStore(database);
 
-    await store.save("example-corp/app#976", state({ headSha: "sha-1", testsTerminalEmittedForSha: false }));
-    await store.save("example-corp/app#976", state({ headSha: "sha-2", testsTerminalEmittedForSha: true }));
+    await store.save("example-corp/app#976", state({ headSha: "sha-1", testsOutcomeEmittedForSha: null }));
+    await store.save("example-corp/app#976", state({ headSha: "sha-2", testsOutcomeEmittedForSha: "succeeded" }));
 
     const restored = await store.get("example-corp/app#976");
     expect(restored?.headSha).toBe("sha-2");
-    expect(restored?.testsTerminalEmittedForSha).toBe(true);
+    expect(restored?.testsOutcomeEmittedForSha).toBe("succeeded");
+
+    await database.close();
+  });
+
+  it("migrates a v1 row with a latched terminal verdict to the watching failed state", async () => {
+    const temp = newTempDb();
+    const database = new SqliteDatabase(temp.path);
+    const store = new SqlitePullRequestLifecycleStore(database);
+
+    // Row as written before the outcome field existed: a boolean latch that
+    // recorded only that SOME terminal tests verdict had been emitted.
+    const v1Json = JSON.stringify({
+      headSha: "sha-old",
+      openedEmitted: true,
+      mergeConflictsEmittedForSha: false,
+      testsTerminalEmittedForSha: true,
+      consecutiveEmptyScansForSha: 0,
+      mergedEmitted: false,
+      terminal: false,
+    });
+    database
+      .prepare("INSERT INTO pr_lifecycle_state (version, key, state_json) VALUES (?, ?, ?)")
+      .run("v1", "example-corp/app#976", v1Json);
+
+    const restored = await store.get("example-corp/app#976");
+    expect(restored?.headSha).toBe("sha-old");
+    // The v1 latch maps to "failed": the producer keeps watching the SHA for
+    // a green re-run. A row whose original verdict was already "succeeded"
+    // converges through the producer-event dedup instead of duplicating.
+    expect(restored?.testsOutcomeEmittedForSha).toBe("failed");
+
+    await database.close();
+  });
+
+  it("migrates a v1 row without a latched verdict to the unwatched null outcome", async () => {
+    const temp = newTempDb();
+    const database = new SqliteDatabase(temp.path);
+    const store = new SqlitePullRequestLifecycleStore(database);
+
+    const v1Json = JSON.stringify({
+      headSha: "sha-old",
+      openedEmitted: true,
+      mergeConflictsEmittedForSha: false,
+      testsTerminalEmittedForSha: false,
+      consecutiveEmptyScansForSha: 2,
+      mergedEmitted: false,
+      terminal: false,
+    });
+    database
+      .prepare("INSERT INTO pr_lifecycle_state (version, key, state_json) VALUES (?, ?, ?)")
+      .run("v1", "example-corp/app#976", v1Json);
+
+    const restored = await store.get("example-corp/app#976");
+    expect(restored?.testsOutcomeEmittedForSha).toBeNull();
+    expect(restored?.consecutiveEmptyScansForSha).toBe(2);
 
     await database.close();
   });

@@ -6,6 +6,7 @@ import type {
 } from "../../producers/github/pull-request-lifecycle-store";
 import type { SqliteDatabase } from "./sqlite-database";
 import { PullRequestLifecycleStateV1 } from "./dto/pull-request-lifecycle-state-v1";
+import { PullRequestLifecycleStateV2 } from "./dto/pull-request-lifecycle-state-v2";
 
 interface LifecycleRow {
   version: string;
@@ -44,8 +45,8 @@ export class SqlitePullRequestLifecycleStore implements PullRequestLifecycleStor
   }
 
   public async save(key: string, state: PrLifecycleState): Promise<void> {
-    const dto = new PullRequestLifecycleStateV1(key, state);
-    this.upsert.run(PullRequestLifecycleStateV1.version, key, dto.toJson());
+    const dto = new PullRequestLifecycleStateV2(key, state);
+    this.upsert.run(PullRequestLifecycleStateV2.version, key, dto.toJson());
   }
 
   public async list(): Promise<readonly StoredLifecycleEntry[]> {
@@ -54,8 +55,11 @@ export class SqlitePullRequestLifecycleStore implements PullRequestLifecycleStor
   }
 
   private rowToState(row: LifecycleRow): PrLifecycleState {
+    if (row.version === PullRequestLifecycleStateV2.version) {
+      return PullRequestLifecycleStateV2.fromJson(row.key, row.state_json).state;
+    }
     if (row.version === PullRequestLifecycleStateV1.version) {
-      return PullRequestLifecycleStateV1.fromJson(row.key, row.state_json).state;
+      return PullRequestLifecycleStateV2.fromV1Json(row.key, row.state_json).state;
     }
     throw new Error(`Unknown pr_lifecycle_state version: ${row.version}`);
   }

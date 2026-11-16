@@ -321,6 +321,114 @@ describe("GithubPrProducer lifecycle", () => {
     expect(payload.failedRuns.map((entry) => entry.name).sort()).toEqual(["e2e", "test"]);
   });
 
+  it("emits pr.tests_succeeded for the same head SHA when a re-run flips failed checks to green", async () => {
+    const client = new FakeGitHubClient();
+    client.setPullRequests(appRef, [pr("example-corp/app", 1, "T", "sha-1")]);
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "failure"),
+    ]);
+
+    const { producer: p, sink } = buildProducer(client, singleRepoPayload());
+    producer = p;
+    await p.start(sink);
+
+    // The failure verdict is emitted and recorded for the SHA.
+    expect(typesOf(sink.events)).toContain(PR_TESTS_FAILED);
+
+    // github-failure-fix's justified no-fix path re-runs the failed job
+    // without pushing: the head SHA is unchanged while the re-run is in
+    // progress, and the producer must wait instead of emitting.
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "in_progress", null),
+    ]);
+    await wait(90);
+    expect(typesOf(sink.events)).not.toContain(PR_TESTS_SUCCEEDED);
+
+    // The re-run completes green on the same SHA: the producer must observe
+    // the failed -> succeeded transition and emit pr.tests_succeeded so the
+    // verify/merge chain proceeds without a new push.
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "success"),
+    ]);
+    await wait(90);
+
+    const succeeded = sink.events.filter((event) => event.type === PR_TESTS_SUCCEEDED);
+    expect(succeeded).toHaveLength(1);
+    expect(succeeded[0].producerEventId).toBe("example-corp/app/PR1/sha-1/tests_succeeded");
+    // The failure verdict is not re-emitted for the same SHA.
+    expect(sink.events.filter((event) => event.type === PR_TESTS_FAILED)).toHaveLength(1);
+  });
+
+  it("does not re-emit pr.tests_failed when a re-run on a latched-failed SHA fails again", async () => {
+    const client = new FakeGitHubClient();
+    client.setPullRequests(appRef, [pr("example-corp/app", 1, "T", "sha-1")]);
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "failure"),
+    ]);
+
+    const { producer: p, sink } = buildProducer(client, singleRepoPayload());
+    producer = p;
+    await p.start(sink);
+
+    expect(typesOf(sink.events)).toContain(PR_TESTS_FAILED);
+
+    // The re-run fails again on the same SHA (a fresh failure of the same
+    // job). Re-emitting the failure would re-trigger github-failure-fix on
+    // every scan and loop, so the producer keeps watching in silence.
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "timed_out"),
+    ]);
+    await wait(120);
+
+    expect(sink.events.filter((event) => event.type === PR_TESTS_FAILED)).toHaveLength(1);
+    expect(typesOf(sink.events)).not.toContain(PR_TESTS_SUCCEEDED);
+
+    // A later green re-run on the same SHA still recovers the chain.
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "success"),
+    ]);
+    await wait(90);
+    expect(sink.events.filter((event) => event.type === PR_TESTS_SUCCEEDED)).toHaveLength(1);
+  });
+
+  it("stops watching a SHA after its green transition: a later red flip emits nothing", async () => {
+    const client = new FakeGitHubClient();
+    client.setPullRequests(appRef, [pr("example-corp/app", 1, "T", "sha-1")]);
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "failure"),
+    ]);
+
+    const { producer: p, sink } = buildProducer(client, singleRepoPayload());
+    producer = p;
+    await p.start(sink);
+
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "success"),
+    ]);
+    await wait(90);
+    expect(sink.events.filter((event) => event.type === PR_TESTS_SUCCEEDED)).toHaveLength(1);
+
+    // Someone re-runs a green check and it fails: the SHA already reported
+    // its terminal green verdict, and the per-SHA failure event was consumed.
+    // Nothing may be emitted for the same SHA again.
+    client.setCheckRuns("sha-1", [
+      run("build", "completed", "success"),
+      run("cdk-synth", "completed", "failure"),
+    ]);
+    await wait(120);
+
+    expect(sink.events.filter((event) => event.type === PR_TESTS_SUCCEEDED)).toHaveLength(1);
+    expect(sink.events.filter((event) => event.type === PR_TESTS_FAILED)).toHaveLength(1);
+  });
+
   it("emits pr.tests_succeeded when zero runs AND zero suites persist past the empty-scan threshold", async () => {
     const client = new FakeGitHubClient();
     client.setPullRequests(appRef, [pr("example-corp/app", 1, "T", "sha-1")]);

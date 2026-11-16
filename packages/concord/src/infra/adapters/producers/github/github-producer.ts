@@ -181,7 +181,7 @@ export class GithubPrProducer implements Producer {
         headSha: pr.headSha,
         openedEmitted: true,
         mergeConflictsEmittedForSha: false,
-        testsTerminalEmittedForSha: false,
+        testsOutcomeEmittedForSha: null,
         consecutiveEmptyScansForSha: 0,
         mergedEmitted: false,
         terminal: false,
@@ -196,7 +196,7 @@ export class GithubPrProducer implements Producer {
           ...state,
           headSha: pr.headSha,
           mergeConflictsEmittedForSha: false,
-          testsTerminalEmittedForSha: false,
+          testsOutcomeEmittedForSha: null,
           consecutiveEmptyScansForSha: 0,
         };
         await this.store.save(key, state);
@@ -217,15 +217,15 @@ export class GithubPrProducer implements Producer {
       }
     }
 
-    if (!state.testsTerminalEmittedForSha) {
+    if (state.testsOutcomeEmittedForSha === null) {
       const decision = await this.decideTests(pr, ref, state);
       if (decision.kind === "emit-succeeded") {
         await this.emitTestsSucceeded(pr, ref, repoUrl, decision.runs);
-        state = { ...state, testsTerminalEmittedForSha: true, consecutiveEmptyScansForSha: 0 };
+        state = { ...state, testsOutcomeEmittedForSha: "succeeded", consecutiveEmptyScansForSha: 0 };
         await this.store.save(key, state);
       } else if (decision.kind === "emit-failed") {
         await this.emitTestsFailed(pr, ref, repoUrl, decision.runs, decision.failed);
-        state = { ...state, testsTerminalEmittedForSha: true, consecutiveEmptyScansForSha: 0 };
+        state = { ...state, testsOutcomeEmittedForSha: "failed", consecutiveEmptyScansForSha: 0 };
         await this.store.save(key, state);
       } else if (decision.kind === "wait") {
         if (decision.emptyScans !== state.consecutiveEmptyScansForSha) {
@@ -235,6 +235,26 @@ export class GithubPrProducer implements Producer {
       } else {
         // pending: nothing to persist this scan, wait for the next one
       }
+    } else if (state.testsOutcomeEmittedForSha === "failed") {
+      // A failed verdict is not final for the SHA: the justified no-fix path
+      // of github-failure-fix re-runs failed jobs (gh run rerun) without
+      // pushing, so the same head SHA can transition from failed to
+      // succeeded. Keep evaluating the checks and emit pr.tests_succeeded
+      // when the re-run completes green, so the verify/merge chain proceeds
+      // without a new push. Never re-emit pr.tests_failed for the same SHA:
+      // the producer-event dedup would no-op it anyway, and re-triggering the
+      // fix agent per scan on a persistently failing SHA would loop.
+      const decision = await this.decideTests(pr, ref, state);
+      if (decision.kind === "emit-succeeded") {
+        await this.emitTestsSucceeded(pr, ref, repoUrl, decision.runs);
+        state = { ...state, testsOutcomeEmittedForSha: "succeeded", consecutiveEmptyScansForSha: 0 };
+        await this.store.save(key, state);
+      }
+      // emit-failed (the re-run failed again), pending (the re-run is still
+      // in progress), and wait: nothing to emit or persist; keep watching.
+    } else {
+      // "succeeded": the SHA already reported its terminal green verdict;
+      // nothing left to observe for it.
     }
   }
 

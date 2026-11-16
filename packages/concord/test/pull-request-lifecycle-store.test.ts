@@ -8,7 +8,7 @@ function freshState(headSha: string): PrLifecycleState {
     headSha,
     openedEmitted: false,
     mergeConflictsEmittedForSha: false,
-    testsTerminalEmittedForSha: false,
+    testsOutcomeEmittedForSha: null,
     consecutiveEmptyScansForSha: 0,
     mergedEmitted: false,
     terminal: false,
@@ -59,16 +59,16 @@ describe("InMemoryPullRequestLifecycleStore", () => {
     const store = new InMemoryPullRequestLifecycleStore();
     const key = "example-corp/app#9";
 
-    const opened = { ...freshState("sha-a"), openedEmitted: true, testsTerminalEmittedForSha: true };
+    const opened = { ...freshState("sha-a"), openedEmitted: true, testsOutcomeEmittedForSha: "failed" };
     await store.save(key, opened);
 
-    const newSha = { ...opened, headSha: "sha-b", mergeConflictsEmittedForSha: false, testsTerminalEmittedForSha: false };
+    const newSha = { ...opened, headSha: "sha-b", mergeConflictsEmittedForSha: false, testsOutcomeEmittedForSha: null };
     await store.save(key, newSha);
 
     const got = await store.get(key);
     expect(got?.headSha).toBe("sha-b");
     expect(got?.openedEmitted).toBe(true);
     expect(got?.mergeConflictsEmittedForSha).toBe(false);
-    expect(got?.testsTerminalEmittedForSha).toBe(false);
+    expect(got?.testsOutcomeEmittedForSha).toBeNull();
   });
 });
