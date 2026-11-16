@@ -63,6 +63,25 @@ export const HEALTH_WARN_AFTER_MS = Math.round(HEALTH_TIMEOUT_MS * HEALTH_WARN_D
 const PROMPT_RETRY_INITIAL_DELAY_MS = 2_000;
 const PROMPT_RETRY_MAX_DELAY_MS = 60_000;
 const PROMPT_RETRY_BACKOFF_MULTIPLIER = 2;
+// How many times promptWithStructuredOutputNudges re-prompts the session after
+// the agent ends a turn without the required JSON object. OpenCode 2.x marks a
+// session idle the moment the agent ends its turn, but an agent may end a turn
+// mid-task on purpose ("the integration suite is running in the background;
+// I'll resume when it finishes") because it wrongly assumes an external driver
+// will wake it. Nothing does: the follow-up prompt is that driver. Each nudge
+// tells the agent to continue inside a single turn and deliver the JSON;
+// the budget bounds a model that keeps ending turns, and the run's own
+// AbortSignal bounds the total time.
+export const MAX_STRUCTURED_OUTPUT_NUDGES = 5;
+// Body of the follow-up prompt; the output contract (schema block) is appended
+// by withStructuredOutputInstruction so the required format stays in context.
+const STRUCTURED_OUTPUT_NUDGE_BODY = [
+  "You ended your turn without the required final JSON output.",
+  "This session has no external driver: nobody will wake you when background work finishes, so ending the turn again cannot make progress.",
+  "Continue the task now, inside this turn.",
+  "If you started a long-running command (test suite, build), wait for it within this turn — for example by polling it from the shell — before you answer.",
+  "Do not end your turn again until the task is complete.",
+].join("\n");
 
 export type PortAllocator = () => number | Promise<number>;
 
@@ -290,11 +309,21 @@ class V2HttpApi {
     // OpenCode 2.x has no native structured output: the schema travels as an
     // explicit output contract in the prompt text and the JSON object is
     // parsed out of the final assistant message (see extractStructuredOutput).
-    const text = schema === undefined ? promptText : withStructuredOutputInstruction(promptText, schema);
-    await this.request("POST", `/api/session/${sessionId}/prompt`, { text }, signal);
-    await this.request("POST", `/api/experimental/session/${sessionId}/wait`, undefined, signal);
-    const payload = await this.request("GET", `/api/session/${sessionId}/message`, undefined, signal);
-    return extractPromptResult((payload as { data?: unknown }).data, schema !== undefined);
+    const sendTurn = async (turnPrompt: string): Promise<unknown> => {
+      await this.request("POST", `/api/session/${sessionId}/prompt`, { text: turnPrompt }, signal);
+      await this.request("POST", `/api/experimental/session/${sessionId}/wait`, undefined, signal);
+      const payload = await this.request("GET", `/api/session/${sessionId}/message`, undefined, signal);
+      return (payload as { data?: unknown }).data;
+    };
+    if (schema === undefined) {
+      return extractPromptResult(await sendTurn(promptText), false);
+    }
+    return promptWithStructuredOutputNudges({
+      promptText,
+      schema,
+      sendTurn,
+      maxNudges: MAX_STRUCTURED_OUTPUT_NUDGES,
+    });
   }
 
   public async interrupt(sessionId: string): Promise<void> {
@@ -1184,12 +1213,19 @@ export function extractStructuredOutput(messages: unknown): unknown {
   return undefined;
 }
 
-// Validates the outcome of a completed prompt turn and reduces it to the value
-// the runner returns: the parsed structured output, or the final assistant
-// text. Throws when the session produced no assistant message at all (empty
-// turn — retried by sendWithRetry) or when the final assistant turn errored
-// (deterministic failure surfaced to the operator).
-export function extractPromptResult(messages: unknown, structured: boolean): unknown {
+// Validates the outcome of a completed prompt turn and classifies it without
+// throwing for the recoverable case: a structured-output turn that ended
+// without parseable JSON (see promptWithStructuredOutputNudges). The
+// unrecoverable cases still throw with the same messages extractPromptResult
+// has always produced: an empty turn (no assistant message — retried by
+// sendWithRetry) and an errored final assistant turn (deterministic failure
+// surfaced to the operator).
+export type PromptTurnOutcome =
+  | { readonly kind: "structured"; readonly output: unknown }
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "missing-structured-output"; readonly finalText: string };
+
+export function classifyPromptTurn(messages: unknown, structured: boolean): PromptTurnOutcome {
   const list = Array.isArray(messages) ? messages : [];
   const finalMessage = list.find(isAssistantMessage);
   if (finalMessage === undefined) {
@@ -1204,13 +1240,75 @@ export function extractPromptResult(messages: unknown, structured: boolean): unk
   if (structured) {
     const output = extractStructuredOutput(list);
     if (output === undefined) {
+      return { kind: "missing-structured-output", finalText: assistantText(finalMessage) };
+    }
+    return { kind: "structured", output };
+  }
+  return { kind: "text", text: assistantText(finalMessage) };
+}
+
+// Validates the outcome of a completed prompt turn and reduces it to the value
+// the runner returns: the parsed structured output, or the final assistant
+// text. Throws when the session produced no assistant message at all (empty
+// turn — retried by sendWithRetry) or when the final assistant turn errored
+// (deterministic failure surfaced to the operator).
+export function extractPromptResult(messages: unknown, structured: boolean): unknown {
+  const outcome = classifyPromptTurn(messages, structured);
+  if (outcome.kind === "missing-structured-output") {
+    throw new UnexpectedStateError(
+      `Opencode produced no structured output; final assistant text: ${outcome.finalText.slice(0, 500)}`,
+    );
+  }
+  if (outcome.kind === "structured") {
+    return outcome.output;
+  }
+  return outcome.text;
+}
+
+// A single prompt→wait cycle, as driven by V2HttpApi.prompt: send the prompt
+// text, block until the session goes idle, and return the session's message
+// list (newest first).
+export type PromptTurnSender = (promptText: string) => Promise<unknown>;
+
+export interface StructuredOutputPromptRequest {
+  readonly promptText: string;
+  readonly schema: object;
+  readonly sendTurn: PromptTurnSender;
+  readonly maxNudges: number;
+}
+
+// Sends a structured-output prompt and, whenever the agent ends its turn
+// without the required JSON object, sends a bounded follow-up prompt to the
+// same session telling it to continue inside a single turn. OpenCode 2.x
+// marks a session idle as soon as the agent ends a turn, and agents legitimately
+// end turns mid-task while background work (e.g. an integration suite) runs,
+// assuming something will resume them later — nothing does. The nudge is that
+// resume: it makes the agent poll the background work to completion within the
+// turn and deliver the JSON. When the nudge budget is exhausted the original
+// "no structured output" failure surfaces, so behaviour is unchanged for a
+// model that never converges. Empty and errored turns throw from
+// classifyPromptTurn exactly as before (the empty turn remains retryable by
+// sendWithRetry through its message signature).
+export async function promptWithStructuredOutputNudges(request: StructuredOutputPromptRequest): Promise<unknown> {
+  let messages = await request.sendTurn(withStructuredOutputInstruction(request.promptText, request.schema));
+  for (let nudge = 0; ; nudge = nudge + 1) {
+    const outcome = classifyPromptTurn(messages, true);
+    if (outcome.kind === "structured") {
+      return outcome.output;
+    }
+    if (outcome.kind === "text") {
+      // Unreachable for structured=true; kept explicit so the outcome union is
+      // fully handled and a future classifier change cannot fail silently.
+      throw new UnexpectedStateError(`opencode structured prompt turn reduced to plain text: ${outcome.text.slice(0, 500)}`);
+    }
+    if (nudge >= request.maxNudges) {
       throw new UnexpectedStateError(
-        `Opencode produced no structured output; final assistant text: ${assistantText(finalMessage).slice(0, 500)}`,
+        `Opencode produced no structured output after ${nudge} follow-up prompt(s); ` +
+        `final assistant text: ${outcome.finalText.slice(0, 500)}`,
       );
     }
-    return output;
+    messages = await request.sendTurn(withStructuredOutputInstruction(STRUCTURED_OUTPUT_NUDGE_BODY, request.schema));
   }
-  return assistantText(finalMessage);
 }
 
 type HealthProbeOutcome =

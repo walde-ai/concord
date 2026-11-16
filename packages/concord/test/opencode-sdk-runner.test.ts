@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { createServer } from "net";
 import path from "path";
 
-import { OpencodeSdkRunner, ChildProcessOpencodeSpawner, HealthProbeRecorder, probeHealth, buildSessionCreateBody, withStructuredOutputInstruction, extractStructuredOutput, extractPromptResult, extractJsonFromText, parseSseFrame, isRetryablePromptFailure, retryDelayMs } from "../src/infra/adapters/opencode/opencode-sdk-runner";
+import { OpencodeSdkRunner, ChildProcessOpencodeSpawner, HealthProbeRecorder, probeHealth, buildSessionCreateBody, withStructuredOutputInstruction, extractStructuredOutput, extractPromptResult, extractJsonFromText, parseSseFrame, isRetryablePromptFailure, retryDelayMs, promptWithStructuredOutputNudges } from "../src/infra/adapters/opencode/opencode-sdk-runner";
 import { noopLogger } from "../src/domain/ports/out/logger";
 import type {
   OpencodeServerSpawner,
@@ -918,6 +918,78 @@ describe("extractPromptResult", () => {
       { type: "assistant", content: [{ type: "text", text: "I could not produce JSON" }] },
     ];
     expect(() => extractPromptResult(messages, true)).toThrow(/no structured output.*I could not produce JSON/);
+  });
+});
+
+describe("promptWithStructuredOutputNudges", () => {
+  // GET /api/session/{id}/message returns messages newest-first; each
+  // assistant message carries a content array of text parts.
+  const assistant = (content: unknown[], extra: object = {}): object => ({ type: "assistant", content, ...extra });
+  const textTurn = (text: string): object => [assistant([{ type: "text", text }])];
+
+  function recordingSender(turns: unknown[][]): { sendTurn: (prompt: string) => Promise<unknown>; prompts: string[] } {
+    const prompts: string[] = [];
+    return {
+      prompts,
+      sendTurn: async (prompt: string): Promise<unknown> => {
+        prompts.push(prompt);
+        return turns[Math.min(prompts.length - 1, turns.length - 1)] ?? [];
+      },
+    };
+  }
+
+  const schema = { type: "object", properties: { prUrl: { type: "string" } }, required: ["prUrl"] };
+
+  it("returns the structured output of the first turn without a follow-up when the agent delivers JSON", async () => {
+    const sender = recordingSender([textTurn('{"prUrl":"https://github.com/o/r/pull/1"}')]);
+    const output = await promptWithStructuredOutputNudges({ promptText: "fix the bug", schema, sendTurn: sender.sendTurn, maxNudges: 5 });
+    expect(output).toEqual({ prUrl: "https://github.com/o/r/pull/1" });
+    expect(sender.prompts).toHaveLength(1);
+    expect(sender.prompts[0]).toContain("fix the bug");
+    expect(sender.prompts[0]).toContain(JSON.stringify(schema));
+  });
+
+  it("nudges the session when the agent ends its turn with plain text, and returns the JSON of a later turn", async () => {
+    // Production shape of the failure this driver fixes: the agent ends its
+    // turn while a background suite runs ("I'll resume when it finishes") and
+    // only produces the JSON object once re-prompted.
+    const sender = recordingSender([
+      textTurn("The diff is complete. The integration suite is running in the background. I'll resume when it finishes."),
+      textTurn("Suite passed."),
+      textTurn('{"prUrl":"https://github.com/o/r/pull/1"}'),
+    ]);
+    const output = await promptWithStructuredOutputNudges({ promptText: "fix the bug", schema, sendTurn: sender.sendTurn, maxNudges: 5 });
+    expect(output).toEqual({ prUrl: "https://github.com/o/r/pull/1" });
+    expect(sender.prompts).toHaveLength(3);
+    expect(sender.prompts[1]).toContain("ended your turn without the required final JSON output");
+    expect(sender.prompts[1]).toContain("Do not end your turn again until the task is complete");
+    // The nudge repeats the output contract so the schema stays in context.
+    expect(sender.prompts[1]).toContain(JSON.stringify(schema));
+    expect(sender.prompts[2]).toContain("ended your turn without the required final JSON output");
+  });
+
+  it("fails with the no-structured-output signature once the nudge budget is exhausted", async () => {
+    const sender = recordingSender([textTurn("still waiting for the suite")]);
+    await expect(
+      promptWithStructuredOutputNudges({ promptText: "fix the bug", schema, sendTurn: sender.sendTurn, maxNudges: 2 }),
+    ).rejects.toThrow(/no structured output after 2 follow-up prompt\(s\).*still waiting for the suite/);
+    expect(sender.prompts).toHaveLength(3);
+  });
+
+  it("propagates the deterministic errored-turn failure without nudging", async () => {
+    const sender = recordingSender([[{ type: "assistant", content: [], finish: "error", error: { message: "provider unavailable" } }]]);
+    await expect(
+      promptWithStructuredOutputNudges({ promptText: "fix the bug", schema, sendTurn: sender.sendTurn, maxNudges: 5 }),
+    ).rejects.toThrow(/provider unavailable/);
+    expect(sender.prompts).toHaveLength(1);
+  });
+
+  it("propagates the retryable empty-turn signature without nudging", async () => {
+    const sender = recordingSender([[]]);
+    await expect(
+      promptWithStructuredOutputNudges({ promptText: "fix the bug", schema, sendTurn: sender.sendTurn, maxNudges: 5 }),
+    ).rejects.toThrow(/produced no assistant message/);
+    expect(sender.prompts).toHaveLength(1);
   });
 });
 
