@@ -103,7 +103,8 @@ export interface OpencodeClientFactory {
 
 // OpenCode 2.x servers require HTTP Basic auth on every API route. The runner
 // owns the spawned process, so it pins the server password through the
-// OPENCODE_PASSWORD env var and hands the same secret to the client factory.
+// OPENCODE_SERVER_PASSWORD env var and hands the same secret to the client
+// factory.
 // Without it, `opencode serve` generates a random password printed to stdout
 // that no API request could authenticate with.
 export interface OpencodeServerAuth {
@@ -216,7 +217,8 @@ function createLongLivedFetch(): Promise<LongLivedFetch> {
 }
 
 // OpenCode 2.x authenticates every API route with HTTP Basic auth; the username
-// is always "opencode" and the password is whatever OPENCODE_PASSWORD pinned on
+// is always "opencode" and the password is whatever OPENCODE_SERVER_PASSWORD
+// pinned on
 // the spawned server (see the migration guide's "Server authentication").
 const V2_AUTH_USERNAME = "opencode";
 
@@ -572,7 +574,8 @@ export class OpencodeSdkRunner implements OpencodeRunner {
     }
 
     // OpenCode 2.x requires HTTP Basic auth on the API. The runner pins a
-    // per-run random password on the spawned server (OPENCODE_PASSWORD) and
+    // per-run random password on the spawned server (OPENCODE_SERVER_PASSWORD)
+    // and
     // authenticates the API client with the same secret. The server listens on
     // 127.0.0.1 only and dies with the run, so the secret's lifetime is the
     // run itself.
@@ -921,7 +924,7 @@ type InlineOpencodeConfig = {
 };
 
 // Builds the env overlay passed to the opencode spawn. Merges the GitHub token
-// GIT_CONFIG overlay and the OPENCODE_PASSWORD server credential with the
+// GIT_CONFIG overlay and the OPENCODE_SERVER_PASSWORD server credential with
 // OPENCODE_CONFIG_CONTENT inline config built by buildInlineConfig. The overlay
 // is always non-empty, so this never returns undefined.
 function buildSpawnEnv(
@@ -935,7 +938,9 @@ function buildSpawnEnv(
   if (tokenOverlay !== undefined) {
     Object.assign(overlay, tokenOverlay);
   }
-  overlay.OPENCODE_PASSWORD = serverPassword;
+  // opencode 2.x does not read OPENCODE_PASSWORD; without the correct env var
+  // the server starts unsecured and rejects the client's Basic auth.
+  overlay.OPENCODE_SERVER_PASSWORD = serverPassword;
   overlay.OPENCODE_CONFIG_CONTENT = JSON.stringify(buildInlineConfig(toolsServer, toolsTimeoutMs));
   return overlay;
 }

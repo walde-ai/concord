@@ -105,9 +105,9 @@ describe("OpencodeSdkRunner.run", () => {
     expect(spawner.spawns[0].port).toBe(44000);
     expect(factory.creates.map((entry) => entry.baseUrl)).toEqual(["http://127.0.0.1:44000"]);
     // The client authenticates with the same per-run password pinned on the
-    // spawned server via OPENCODE_PASSWORD (OpenCode 2.x requires HTTP Basic
-    // auth on every API route).
-    expect(factory.creates[0]!.auth.password).toBe(spawner.spawns[0].env!.OPENCODE_PASSWORD);
+    // spawned server via OPENCODE_SERVER_PASSWORD (OpenCode 2.x requires HTTP
+    // Basic auth on every API route).
+    expect(factory.creates[0]!.auth.password).toBe(spawner.spawns[0].env!.OPENCODE_SERVER_PASSWORD);
     // Agent and model travel to session creation in 2.x; the runner passes the
     // spawn directory so the session is created at the worktree location.
     expect(client.sessions).toEqual([
