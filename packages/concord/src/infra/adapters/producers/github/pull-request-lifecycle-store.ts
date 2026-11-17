@@ -2,7 +2,8 @@
 // - null: no terminal verdict emitted yet; the producer evaluates the checks
 //   on every scan and emits the first terminal outcome it observes.
 // - "failed": a pr.tests_failed was emitted for this SHA, but the outcome is
-//   NOT final for the SHA: github-failure-fix's justified no-fix path re-runs
+//   NOT final for the SHA: a code-fixing consumer's justified no-fix path
+//   re-runs
 //   failed jobs (gh run rerun) without pushing, which can flip the same SHA
 //   from failed to succeeded. The producer keeps watching and emits
 //   pr.tests_succeeded when the re-run goes green.

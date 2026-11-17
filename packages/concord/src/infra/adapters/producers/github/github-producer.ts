@@ -236,8 +236,8 @@ export class GithubPrProducer implements Producer {
         // pending: nothing to persist this scan, wait for the next one
       }
     } else if (state.testsOutcomeEmittedForSha === "failed") {
-      // A failed verdict is not final for the SHA: the justified no-fix path
-      // of github-failure-fix re-runs failed jobs (gh run rerun) without
+      // A failed verdict is not final for the SHA: a justified no-fix verdict
+      // from a code-fixing consumer re-runs failed jobs (gh run rerun) without
       // pushing, so the same head SHA can transition from failed to
       // succeeded. Keep evaluating the checks and emit pr.tests_succeeded
       // when the re-run completes green, so the verify/merge chain proceeds

@@ -103,10 +103,10 @@ function isEscalatedVerdict(output: unknown): boolean {
 // pushing a commit. Like the escalation verdict this is a deliberate,
 // self-reported outcome, not the silent no-op stall the no-commit guard exists
 // to catch, so the guard is skipped and the caller decides from the verdict.
-// Observed in production (2026-11-16): github-failure-fix diagnosed PR
-// accelerates-it/walde#1575's CDK Synth Guard failure as the job's
-// timeout-minutes budget cancelling a green suite, correctly pushed no commit
-// citing the recorded decision in walde#1500 — and the run failed as
+// Observed in production (2026-11-16): a deployment's PR-failure consumer
+// diagnosed PR accelerates-it/walde#1575's CDK Synth Guard failure as the
+// job's timeout-minutes budget cancelling a green suite, correctly pushed no
+// commit citing the recorded decision in walde#1500 — and the run failed as
 // "agent did not push a commit; failing checks not fixed", parking the chain
 // for a non-defect.
 export function isNoFixNeededVerdict(output: unknown): boolean {
