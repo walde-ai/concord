@@ -58,6 +58,7 @@ export class App {
     public readonly pullRequestLifecycleStore: PullRequestLifecycleStore,
     consumerStateRepository: ConsumerStateRepository,
     public readonly worktreeLeases: WorktreeLeases,
+    private readonly postProducerStartables: Startable[] = [],
   ) {
     this.interruptedRunReconciler = new InterruptedRunReconciler(
       runRepository,
@@ -86,7 +87,10 @@ export class App {
   }
 
   public async start(): Promise<void> {
-    await this.interruptedRunReconciler.reconcile();
+    // Snapshot orphaned runs (RUNNING/PENDING_INPUT left by a previous
+    // process) BEFORE anything in this one can dispatch, so the reconcile
+    // below never races runs this process legitimately started.
+    const orphans = await this.interruptedRunReconciler.collectOrphans();
     // Bind the HTTP server (and the rest of the startables) BEFORE starting
     // producers. A producer's first poll can emit an event whose dispatch
     // SignalEventInteractor awaits to completion; if that consumer run is slow
@@ -105,6 +109,17 @@ export class App {
         error: result.reason instanceof Error ? result.reason.message : String(result.reason),
       });
     }
+    // Resume work — interrupted-run reconcile and the off-peak drain — only
+    // in a fully started app. Both re-drive consumer runs, and a resumed
+    // handler can emit through its InlineProducer, which requires the
+    // producer-start phase above to have completed: draining earlier fails
+    // the resumed run within seconds with "InlineProducer … has not been
+    // started" (observed in production 2026-11-17: an off-peak-parked
+    // verification run drained at startup raced producer start and died two
+    // seconds in). The reconciler redispatches on the detached track, so a
+    // slow resumed run no longer blocks this call either.
+    await this.interruptedRunReconciler.reconcile(orphans);
+    await Promise.allSettled(this.postProducerStartables.map((service) => service.start()));
   }
 
   public async stop(): Promise<void> {

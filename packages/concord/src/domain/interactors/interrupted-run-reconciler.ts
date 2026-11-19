@@ -48,20 +48,39 @@ export class InterruptedRunReconciler {
     private readonly logger: Logger,
   ) {}
 
-  public async reconcile(): Promise<number> {
-    let reconciled = 0;
+  // Snapshots the orphan candidates — runs whose live handler invocation
+  // belonged to a previous process. App.start() captures this BEFORE anything
+  // in the new process can start runs (startables, producers), then reconciles
+  // exactly this snapshot once the app is fully started. Reconciling from a
+  // fresh listing at that point would race runs this process legitimately
+  // started (a producer's first poll can dispatch, and a fast-failing handler
+  // can even finish, before the reconcile pass) and would wrongly fail
+  // healthy runs as "interrupted".
+  public async collectOrphans(): Promise<readonly Run<unknown>[]> {
+    const collected: Run<unknown>[] = [];
     for (const state of ORPHANED_STATES) {
       const result = await this.runRepository.listByState(state, {
         limit: RECONCILE_BATCH_LIMIT,
         offset: 0,
       });
-      for (const run of result.items) {
-        this.markInterrupted(run);
-        await this.runRepository.save(run);
-        this.observer.runStateChanged(run);
-        await this.redispatch(run);
-        reconciled += 1;
-      }
+      collected.push(...result.items);
+    }
+    return collected;
+  }
+
+  // Terminalizes and re-dispatches orphaned runs. With no argument the
+  // orphan snapshot is taken immediately (the original behaviour, used by
+  // tests and safe when nothing else is dispatching); App.start() passes the
+  // pre-start snapshot instead.
+  public async reconcile(orphans?: readonly Run<unknown>[]): Promise<number> {
+    const candidates = orphans ?? await this.collectOrphans();
+    let reconciled = 0;
+    for (const run of candidates) {
+      this.markInterrupted(run);
+      await this.runRepository.save(run);
+      this.observer.runStateChanged(run);
+      await this.redispatch(run);
+      reconciled += 1;
     }
     return reconciled;
   }

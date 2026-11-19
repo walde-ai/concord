@@ -279,6 +279,7 @@ export function MakeApp(config: AppConfig = {}): App {
   producerRegistry.register({ producerId: CONCORD_RUN_INPUT_PRODUCER_ID, disableable: false });
   startables.push({ start: async () => { await runInputProducer.start(eventSink); } });
 
+
   const requestRunInput = new RequestRunInputInteractor(
     persistence.runRepository,
     persistence.formRepository,
@@ -303,9 +304,12 @@ export function MakeApp(config: AppConfig = {}): App {
     clock,
   );
 
-  startables.push(offPeakScheduler);
+  // The off-peak drain re-drives parked consumer runs, whose handlers can emit
+  // through their InlineProducers — so it must start only AFTER the producer
+  // start phase (see App.start). Kept out of `startables` for that reason;
+  // closed with everything else.
+  const postProducerStartables: Startable[] = [offPeakScheduler];
   closeables.push(offPeakScheduler);
-
   if (config.api !== undefined) {
     const auth = defaultAuthConfig(config.auth);
 
@@ -420,7 +424,7 @@ export function MakeApp(config: AppConfig = {}): App {
 
   const runActivityEmitter: RunActivityEmitter = broadcaster ?? new NoOpRunActivityEmitter();
 
-  return new App(eventSink, registry, producerRegistry, eventTemplateRegistry, idGenerator, clock, contexts, configResolver, secretResolver, persistence.runRepository, observer, logger, requestRunInput, recordRunUpdate, submitRunInput, persistence.formRepository, runActivityEmitter, widgetRegistry, runDispatcher, closeables, startables, persistence.pullRequestLifecycleStore, persistence.consumerStateRepository, worktreeLeases);
+  return new App(eventSink, registry, producerRegistry, eventTemplateRegistry, idGenerator, clock, contexts, configResolver, secretResolver, persistence.runRepository, observer, logger, requestRunInput, recordRunUpdate, submitRunInput, persistence.formRepository, runActivityEmitter, widgetRegistry, runDispatcher, closeables, startables, persistence.pullRequestLifecycleStore, persistence.consumerStateRepository, worktreeLeases, postProducerStartables);
 }
 
 function resolvePersistence(config: AppConfig, closeables: Closeable[]): Persistence {
