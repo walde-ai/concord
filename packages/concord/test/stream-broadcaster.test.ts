@@ -155,6 +155,44 @@ describe("StreamBroadcaster — per-run activity routing", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("registers a subscription from an ArrayBuffer text payload", () => {
+    const broadcaster = new StreamBroadcaster();
+    const socket = new FakeSocket(WebSocket.OPEN);
+    const spy = vi.spyOn(socket, "send");
+    broadcaster.addClient(socket as unknown as WebSocket);
+
+    const encoded = new TextEncoder().encode(JSON.stringify({ type: "subscribe", runId: "run-1" }));
+    socket.emit("message", encoded.buffer, false);
+
+    broadcaster.emit(makeFrame("run-1"));
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers a subscription from a fragmented Buffer[] text payload", () => {
+    const broadcaster = new StreamBroadcaster();
+    const socket = new FakeSocket(WebSocket.OPEN);
+    const spy = vi.spyOn(socket, "send");
+    broadcaster.addClient(socket as unknown as WebSocket);
+
+    const whole = Buffer.from(JSON.stringify({ type: "subscribe", runId: "run-1" }), "utf8");
+    socket.emit("message", [whole.subarray(0, 5), whole.subarray(5)], false);
+
+    broadcaster.emit(makeFrame("run-1"));
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores binary frames even when the payload is valid JSON", () => {
+    const broadcaster = new StreamBroadcaster();
+    const socket = new FakeSocket(WebSocket.OPEN);
+    const spy = vi.spyOn(socket, "send");
+    broadcaster.addClient(socket as unknown as WebSocket);
+
+    socket.emit("message", Buffer.from(JSON.stringify({ type: "subscribe", runId: "run-1" }), "utf8"), true);
+
+    broadcaster.emit(makeFrame("run-1"));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("registers per-run subscriptions from the binary frames ws delivers (Buffer, not string)", () => {
     const broadcaster = new StreamBroadcaster();
     const socket = new FakeSocket(WebSocket.OPEN);

@@ -1,4 +1,4 @@
-import { WebSocket } from "ws";
+import { WebSocket, type RawData } from "ws";
 import type { Event } from "../../../domain/entities/event";
 import type { Run } from "../../../domain/entities/run";
 import type { PeakHours } from "../../../domain/peak-hours";
@@ -31,7 +31,7 @@ export class StreamBroadcaster implements EventLifecycleObserver, RunActivityEmi
 
   public addClient(socket: WebSocket): void {
     this.clients.add(socket);
-    socket.on("message", (raw: unknown) => this.handleClientMessage(socket, raw));
+    socket.on("message", (raw: RawData, isBinary: boolean) => this.handleClientMessage(socket, raw, isBinary));
     socket.on("close", () => {
       this.removeSocketEverywhere(socket);
     });
@@ -107,7 +107,12 @@ export class StreamBroadcaster implements EventLifecycleObserver, RunActivityEmi
     return this.hasClients();
   }
 
-  private handleClientMessage(socket: WebSocket, raw: unknown): void {
+  private handleClientMessage(socket: WebSocket, raw: RawData, isBinary: boolean): void {
+    // Control messages are JSON text frames; a binary frame cannot carry one,
+    // so it is ignored explicitly instead of being decoded and parsed.
+    if (isBinary) {
+      return;
+    }
     const text = rawClientMessageToText(raw);
     if (text === null) {
       return;

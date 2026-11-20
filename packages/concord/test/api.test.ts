@@ -10,6 +10,7 @@ import type { Registration } from "../src/domain/ports/in/registration";
 import { MakeApp } from "../src/infra/main/make-app";
 import { HttpApiServer } from "../src/infra/adapters/api/http-api-server";
 import { StreamBroadcaster } from "../src/infra/adapters/api/stream-broadcaster";
+import type { RunActivityFrame } from "../src/infra/adapters/opencode/run-activity-emitter";
 import { InMemoryEventStore } from "../src/infra/adapters/stores/in-memory-event-store";
 import { InMemoryRunRepository } from "../src/infra/adapters/stores/in-memory-run-repository";
 import { InMemoryProducerStateRepository } from "../src/infra/adapters/stores/in-memory-producer-state-repository";
@@ -565,6 +566,124 @@ describe("WebSocket streaming — lifecycle frames", () => {
     expect((terminal.data as { state: string }).state).toBe("FAILED");
 
     client.close();
+  });
+});
+
+describe("WebSocket streaming — run activity routing", () => {
+  let app: App | null = null;
+
+  afterEach(async () => {
+    if (app !== null) {
+      await app.stop();
+      app = null;
+    }
+  });
+
+  // The broadcaster handed to the API server is the same RunActivityEmitter
+  // the agent runners emit through, so driving it directly is exactly the
+  // production path a run's chat/tool activity takes.
+  function resolveApiServer(app: App): { baseUrl: string; broadcaster: StreamBroadcaster } {
+    const internal = app as unknown as {
+      startables: Array<{ address: { host: string; port: number } | null; broadcaster?: StreamBroadcaster }>;
+    };
+    for (const service of internal.startables) {
+      if (service.address !== null && service.address !== undefined && service.broadcaster !== undefined) {
+        return { baseUrl: `${service.address.host}:${service.address.port}`, broadcaster: service.broadcaster };
+      }
+    }
+    throw new Error("No started API server found on App");
+  }
+
+  async function bootStreamApp(): Promise<{ baseUrl: string; broadcaster: StreamBroadcaster; credentialStore: InMemoryCredentialStore }> {
+    const credentialStore = new InMemoryCredentialStore();
+    app = MakeApp({
+      idGenerator: new SequentialIdGenerator(),
+      eventStore: new InMemoryEventStore(),
+      runRepository: new InMemoryRunRepository(),
+      credentialStore,
+      api: { host: "127.0.0.1", port: 0 },
+      auth: {
+        argon2: TEST_ARGON2ID_PARAMETERS,
+        handshakeTtlMs: 30_000,
+        sessionLifetimeMs: 3_600_000,
+        freshnessWindowMs: 5 * 60 * 1000,
+        pepper: "integration-pepper",
+      },
+    });
+    await app.start();
+    const { baseUrl, broadcaster } = resolveApiServer(app);
+    return { baseUrl, broadcaster, credentialStore };
+  }
+
+  function makeActivityFrame(runId: string): RunActivityFrame {
+    return {
+      runId,
+      consumerId: "c-1",
+      sessionId: "sess-1",
+      kind: "message.part.updated",
+      payload: { part: { type: "text", text: "hello" } },
+      at: "2026-11-19T20:00:00.000Z",
+    };
+  }
+
+  // The server does not acknowledge subscribe/unsubscribe, and client.send()
+  // only queues the frame on the wire. Settle before emitting so the server has
+  // processed the control message first.
+  function settle(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  function collectFrames(client: WebSocket): { type: string; data: unknown }[] {
+    const frames: { type: string; data: unknown }[] = [];
+    client.on("message", (raw: { toString: () => string }) => {
+      frames.push(JSON.parse(raw.toString()));
+    });
+    return frames;
+  }
+
+  it("delivers run.activity to a client that subscribed with a real text frame", async () => {
+    const { baseUrl, broadcaster, credentialStore } = await bootStreamApp();
+    const client = await openAuthenticatedStream(baseUrl, credentialStore, "alice", "secret");
+    const frames = collectFrames(client);
+
+    // A real ws client send() of a string is a text frame: the server receives
+    // it as a Buffer RawData payload. This is the exact browser path.
+    client.send(JSON.stringify({ type: "subscribe", runId: "run-1" }));
+    await settle();
+    broadcaster.emit(makeActivityFrame("run-1"));
+
+    await waitFor(() => (frames.length >= 1 ? frames : undefined));
+
+    expect(frames[0].type).toBe("run.activity");
+    expect((frames[0].data as { runId: string }).runId).toBe("run-1");
+
+    client.close();
+  });
+
+  it("keeps run.activity away from clients subscribed to other runs and honors unsubscribe", async () => {
+    const { baseUrl, broadcaster, credentialStore } = await bootStreamApp();
+    const subscriber = await openAuthenticatedStream(baseUrl, credentialStore, "alice", "secret");
+    const other = await openAuthenticatedStream(baseUrl, credentialStore, "alice", "secret");
+    const subscriberFrames = collectFrames(subscriber);
+    const otherFrames = collectFrames(other);
+
+    subscriber.send(JSON.stringify({ type: "subscribe", runId: "run-1" }));
+    other.send(JSON.stringify({ type: "subscribe", runId: "run-2" }));
+    await settle();
+
+    broadcaster.emit(makeActivityFrame("run-1"));
+    await waitFor(() => (subscriberFrames.length >= 1 ? subscriberFrames : undefined));
+    expect(subscriberFrames).toHaveLength(1);
+    expect(otherFrames).toHaveLength(0);
+
+    subscriber.send(JSON.stringify({ type: "unsubscribe", runId: "run-1" }));
+    await settle();
+    broadcaster.emit(makeActivityFrame("run-1"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(subscriberFrames).toHaveLength(1);
+
+    subscriber.close();
+    other.close();
   });
 });
 
